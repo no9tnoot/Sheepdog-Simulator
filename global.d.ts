@@ -16,7 +16,7 @@ interface Rectangle {
   grazeTargetY: number;
 }
 
-type GrazePhase = 'idle' | 'walking';
+type GrazePhase = 'paused' | 'walking';
 
 interface Obstacle {
   x: number;

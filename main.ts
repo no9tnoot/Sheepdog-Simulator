@@ -38,11 +38,11 @@ const BOID_CRUISE_SPEED_DECAY = 0.94;
 
 // Grazing
 const HERD_COOLDOWN_MS = 10_000;
-const BOID_GRAZING_COHESION_WEIGHT = 0.12;
-const BOID_GRAZING_SEPARATION_WEIGHT = 1.9;
-const BOID_GRAZING_ALIGNMENT_WEIGHT = 0.15;
-const GRAZE_IDLE_MIN_FRAMES = 90;
-const GRAZE_IDLE_MAX_FRAMES = 240;
+const BOID_GRAZING_COHESION_WEIGHT = 0.08;
+const BOID_GRAZING_SEPARATION_WEIGHT = 2.7;
+const BOID_GRAZING_SEPARATION_RADIUS = 26;
+const GRAZE_PAUSE_MIN_FRAMES = 180;
+const GRAZE_PAUSE_MAX_FRAMES = 300;
 const GRAZE_MOVE_MIN_DISTANCE = 8;
 const GRAZE_MOVE_MAX_DISTANCE = 28;
 const GRAZE_WALK_SPEED = 0.07;
@@ -55,6 +55,9 @@ const BOID_WANDER_DISTANCE = 18;
 
 // Rotation smoothing
 const BOID_ROTATION_SMOOTHING = 0.2;
+const BOID_MAX_TURN_RATE = 0.035;
+const BOID_GRAZE_MAX_TURN_RATE = 0.02;
+const BOID_MIN_SPEED_FOR_ROTATION = 0.02;
 
 // Sheepdog cursor
 const DOG_RADIUS = 7;
@@ -133,10 +136,10 @@ function getDogPanicLevel(boid: Rectangle): number {
   return strength * strength;
 }
 
-function randomGrazeIdleTime(): number {
+function randomGrazePauseTime(): number {
   return (
-    GRAZE_IDLE_MIN_FRAMES +
-    Math.floor(Math.random() * (GRAZE_IDLE_MAX_FRAMES - GRAZE_IDLE_MIN_FRAMES))
+    GRAZE_PAUSE_MIN_FRAMES +
+    Math.floor(Math.random() * (GRAZE_PAUSE_MAX_FRAMES - GRAZE_PAUSE_MIN_FRAMES))
   );
 }
 
@@ -162,8 +165,8 @@ function createBoidMotion(velocity: { vx: number; vy: number }): Pick<
     wanderStrength: 0.75 + Math.random() * 0.5,
     grazing: true,
     lastDogSeenAt: 0,
-    grazePhase: 'idle',
-    grazeTimer: randomGrazeIdleTime(),
+    grazePhase: 'paused',
+    grazeTimer: randomGrazePauseTime(),
     grazeTargetX: 0,
     grazeTargetY: 0,
   };
@@ -181,8 +184,8 @@ function updateGrazingState(boid: Rectangle): void {
 
   if (now - boid.lastDogSeenAt >= HERD_COOLDOWN_MS) {
     if (!boid.grazing) {
-      boid.grazePhase = 'idle';
-      boid.grazeTimer = randomGrazeIdleTime();
+      boid.grazePhase = 'paused';
+      boid.grazeTimer = randomGrazePauseTime() + Math.floor(Math.random() * 90);
       boid.vx = 0;
       boid.vy = 0;
     }
@@ -201,13 +204,21 @@ function clampGrazeTarget(x: number, y: number): { x: number; y: number } {
 function updateGrazing(boid: Rectangle): void {
   const center = getCenter(boid);
 
-  if (boid.grazePhase === 'idle') {
+  if (boid.grazePhase === 'paused') {
     boid.vx = 0;
     boid.vy = 0;
     boid.grazeTimer--;
 
     if (boid.grazeTimer <= 0) {
-      const angle = Math.random() * Math.PI * 2;
+      const separationForce = separation(boid, rectangles, BOID_GRAZING_SEPARATION_RADIUS);
+      const separationMag = Math.hypot(separationForce.x, separationForce.y);
+      let angle = Math.random() * Math.PI * 2;
+
+      if (separationMag > 0.05) {
+        angle = Math.atan2(separationForce.y, separationForce.x);
+        angle += (Math.random() - 0.5) * Math.PI * 0.5;
+      }
+
       const distance =
         GRAZE_MOVE_MIN_DISTANCE +
         Math.random() * (GRAZE_MOVE_MAX_DISTANCE - GRAZE_MOVE_MIN_DISTANCE);
@@ -229,8 +240,8 @@ function updateGrazing(boid: Rectangle): void {
   if (dist < GRAZE_ARRIVAL_DISTANCE) {
     boid.vx = 0;
     boid.vy = 0;
-    boid.grazePhase = 'idle';
-    boid.grazeTimer = randomGrazeIdleTime();
+    boid.grazePhase = 'paused';
+    boid.grazeTimer = randomGrazePauseTime();
     return;
   }
 
@@ -239,13 +250,22 @@ function updateGrazing(boid: Rectangle): void {
 }
 
 function smoothRotation(boid: Rectangle): void {
-  if (Math.hypot(boid.vx, boid.vy) <= 0.001) return;
+  const speed = Math.hypot(boid.vx, boid.vy);
+  if (speed < BOID_MIN_SPEED_FOR_ROTATION) return;
 
+  const maxTurnRate = boid.grazing ? BOID_GRAZE_MAX_TURN_RATE : BOID_MAX_TURN_RATE;
   const targetAngle = velocityToAngle(boid.vx, boid.vy);
   let angleDiff = targetAngle - boid.angle;
   while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
   while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-  boid.angle += angleDiff * BOID_ROTATION_SMOOTHING;
+
+  const desiredTurn = angleDiff * BOID_ROTATION_SMOOTHING;
+  const turn =
+    Math.abs(desiredTurn) > maxTurnRate
+      ? Math.sign(desiredTurn) * maxTurnRate
+      : desiredTurn;
+
+  boid.angle += turn;
 }
 
 function wander(boid: Rectangle): { x: number; y: number } {
@@ -465,7 +485,11 @@ function closestPointOnRect(
   return { x: closestX, y: closestY };
 }
 
-function separation(boid: Rectangle, neighbors: Rectangle[]): { x: number; y: number } {
+function separation(
+  boid: Rectangle,
+  neighbors: Rectangle[],
+  radius: number = BOID_SEPARATION_RADIUS,
+): { x: number; y: number } {
   const center = getCenter(boid);
   let steerX = 0;
   let steerY = 0;
@@ -479,7 +503,7 @@ function separation(boid: Rectangle, neighbors: Rectangle[]): { x: number; y: nu
     const dy = center.y - otherCenter.y;
     const dist = Math.hypot(dx, dy);
 
-    if (dist > 0 && dist < BOID_SEPARATION_RADIUS) {
+    if (dist > 0 && dist < radius) {
       steerX += dx / dist;
       steerY += dy / dist;
       count++;
@@ -606,37 +630,24 @@ function updateBoids(): void {
     if (boid.grazing) {
       updateGrazing(boid);
 
-      const separationForce = separation(boid, rectangles);
+      const separationForce = separation(boid, rectangles, BOID_GRAZING_SEPARATION_RADIUS);
       const cohesionForce = cohesion(boid, rectangles);
-      const alignmentForce = alignment(boid, rectangles);
       const obstacleForce = obstacleAvoidance(boid);
       const boundaryForce = boundaryAvoidance(boid);
 
-      if (boid.grazePhase === 'idle') {
-        boid.vx +=
-          separationForce.x * BOID_GRAZING_SEPARATION_WEIGHT +
-          cohesionForce.x * BOID_GRAZING_COHESION_WEIGHT +
-          alignmentForce.x * BOID_GRAZING_ALIGNMENT_WEIGHT +
-          obstacleForce.x * BOID_OBSTACLE_AVOIDANCE_WEIGHT +
-          boundaryForce.x * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
-
-        boid.vy +=
-          separationForce.y * BOID_GRAZING_SEPARATION_WEIGHT +
-          cohesionForce.y * BOID_GRAZING_COHESION_WEIGHT +
-          alignmentForce.y * BOID_GRAZING_ALIGNMENT_WEIGHT +
-          obstacleForce.y * BOID_OBSTACLE_AVOIDANCE_WEIGHT +
-          boundaryForce.y * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
-
-        const idleSpeed = Math.hypot(boid.vx, boid.vy);
-        if (idleSpeed > GRAZE_WALK_SPEED) {
-          boid.vx = (boid.vx / idleSpeed) * GRAZE_WALK_SPEED;
-          boid.vy = (boid.vy / idleSpeed) * GRAZE_WALK_SPEED;
-        }
-      } else {
+      if (boid.grazePhase === 'walking') {
         boid.vx += obstacleForce.x * BOID_OBSTACLE_AVOIDANCE_WEIGHT;
         boid.vy += obstacleForce.y * BOID_OBSTACLE_AVOIDANCE_WEIGHT;
         boid.vx += boundaryForce.x * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
         boid.vy += boundaryForce.y * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
+
+        boid.vx +=
+          separationForce.x * BOID_GRAZING_SEPARATION_WEIGHT +
+          cohesionForce.x * BOID_GRAZING_COHESION_WEIGHT;
+
+        boid.vy +=
+          separationForce.y * BOID_GRAZING_SEPARATION_WEIGHT +
+          cohesionForce.y * BOID_GRAZING_COHESION_WEIGHT;
 
         const walkSpeed = Math.hypot(boid.vx, boid.vy);
         if (walkSpeed > GRAZE_WALK_SPEED) {
@@ -645,7 +656,9 @@ function updateBoids(): void {
         }
       }
 
-      smoothRotation(boid);
+      if (boid.grazePhase === 'walking') {
+        smoothRotation(boid);
+      }
 
       const center = getCenter(boid);
       setCenter(boid, center.x + boid.vx, center.y + boid.vy);
