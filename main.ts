@@ -24,14 +24,17 @@ const BOID_WANDER_WEIGHT = 0.45;
 const BOID_DOG_AVOIDANCE_WEIGHT = 3.5;
 
 // Boid perception and movement
-const BOID_PERCEPTION_RADIUS = 25;
+const BOID_PERCEPTION_RADIUS = 50;
 const BOID_SEPARATION_RADIUS = 18;
 const BOID_OBSTACLE_AVOIDANCE_DISTANCE = 1;
 const BOID_BOUNDARY_MARGIN = 1;
 const BOID_DOG_AVOIDANCE_DISTANCE = 70;
-const BOID_MIN_SPEED = 0.05;
-const BOID_MAX_SPEED = 0.5;
+const BOID_CRUISE_MIN_SPEED = 0.05;
+const BOID_CRUISE_MAX_SPEED = 0.5;
+const BOID_PANIC_MAX_SPEED = 2.0;
 const BOID_MAX_FORCE = 0.15;
+const BOID_PANIC_MAX_FORCE = 0.55;
+const BOID_CRUISE_SPEED_DECAY = 0.94;
 
 // Wander steering
 const BOID_WANDER_JITTER = 0.2;
@@ -102,8 +105,20 @@ function velocityToAngle(vx: number, vy: number): number {
 
 function randomVelocity(): { vx: number; vy: number } {
   const angle = Math.random() * Math.PI * 2;
-  const speed = BOID_MIN_SPEED + Math.random() * (BOID_MAX_SPEED - BOID_MIN_SPEED);
+  const speed =
+    BOID_CRUISE_MIN_SPEED + Math.random() * (BOID_CRUISE_MAX_SPEED - BOID_CRUISE_MIN_SPEED);
   return { vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed };
+}
+
+function getDogPanicLevel(boid: Rectangle): number {
+  if (!mouseOnCanvas) return 0;
+
+  const center = getCenter(boid);
+  const dist = Math.hypot(center.x - mouseX, center.y - mouseY);
+  if (dist >= BOID_DOG_AVOIDANCE_DISTANCE || dist === 0) return 0;
+
+  const strength = (BOID_DOG_AVOIDANCE_DISTANCE - dist) / BOID_DOG_AVOIDANCE_DISTANCE;
+  return strength * strength;
 }
 
 function createBoidMotion(velocity: { vx: number; vy: number }): Pick<
@@ -148,29 +163,45 @@ function wander(boid: Rectangle): { x: number; y: number } {
   };
 }
 
-function limitForce(fx: number, fy: number): { x: number; y: number } {
+function limitForce(
+  fx: number,
+  fy: number,
+  maxForce: number = BOID_MAX_FORCE,
+): { x: number; y: number } {
   const magnitude = Math.hypot(fx, fy);
-  if (magnitude > BOID_MAX_FORCE) {
-    return { x: (fx / magnitude) * BOID_MAX_FORCE, y: (fy / magnitude) * BOID_MAX_FORCE };
+  if (magnitude > maxForce) {
+    return { x: (fx / magnitude) * maxForce, y: (fy / magnitude) * maxForce };
   }
   return { x: fx, y: fy };
 }
 
-function limitSpeed(rect: Rectangle): void {
-  const speed = Math.hypot(rect.vx, rect.vy);
+function limitSpeed(rect: Rectangle, panicLevel: number): void {
+  const maxSpeed =
+    BOID_CRUISE_MAX_SPEED + (BOID_PANIC_MAX_SPEED - BOID_CRUISE_MAX_SPEED) * panicLevel;
+
+  let speed = Math.hypot(rect.vx, rect.vy);
   if (speed === 0) {
     const velocity = randomVelocity();
     rect.vx = velocity.vx;
     rect.vy = velocity.vy;
     return;
   }
-  if (speed > BOID_MAX_SPEED) {
-    rect.vx = (rect.vx / speed) * BOID_MAX_SPEED;
-    rect.vy = (rect.vy / speed) * BOID_MAX_SPEED;
-  } else if (speed < BOID_MIN_SPEED) {
-    rect.vx = (rect.vx / speed) * BOID_MIN_SPEED;
-    rect.vy = (rect.vy / speed) * BOID_MIN_SPEED;
+
+  const dirX = rect.vx / speed;
+  const dirY = rect.vy / speed;
+
+  if (panicLevel < 0.05 && speed > BOID_CRUISE_MAX_SPEED) {
+    speed = BOID_CRUISE_MAX_SPEED + (speed - BOID_CRUISE_MAX_SPEED) * BOID_CRUISE_SPEED_DECAY;
   }
+
+  if (speed > maxSpeed) {
+    speed = maxSpeed;
+  } else if (speed < BOID_CRUISE_MIN_SPEED) {
+    speed = BOID_CRUISE_MIN_SPEED;
+  }
+
+  rect.vx = dirX * speed;
+  rect.vy = dirY * speed;
 }
 
 function getObbPoints(rect: Rectangle): { x: number; y: number }[] {
@@ -432,20 +463,16 @@ function obstacleAvoidance(boid: Rectangle): { x: number; y: number } {
 }
 
 function dogAvoidance(boid: Rectangle): { x: number; y: number } {
-  if (!mouseOnCanvas) return { x: 0, y: 0 };
+  const panic = getDogPanicLevel(boid);
+  if (panic === 0) return { x: 0, y: 0 };
 
   const center = getCenter(boid);
   const dx = center.x - mouseX;
   const dy = center.y - mouseY;
   const dist = Math.hypot(dx, dy);
+  const maxForce = BOID_MAX_FORCE + (BOID_PANIC_MAX_FORCE - BOID_MAX_FORCE) * panic;
 
-  if (dist >= BOID_DOG_AVOIDANCE_DISTANCE || dist === 0) {
-    return { x: 0, y: 0 };
-  }
-
-  const strength = (BOID_DOG_AVOIDANCE_DISTANCE - dist) / BOID_DOG_AVOIDANCE_DISTANCE;
-  const panic = strength * strength;
-  return limitForce((dx / dist) * panic, (dy / dist) * panic);
+  return limitForce((dx / dist) * panic, (dy / dist) * panic, maxForce);
 }
 
 function boundaryAvoidance(boid: Rectangle): { x: number; y: number } {
@@ -470,6 +497,7 @@ function boundaryAvoidance(boid: Rectangle): { x: number; y: number } {
 
 function updateBoids(): void {
   for (const boid of rectangles) {
+    const panicLevel = getDogPanicLevel(boid);
     const separationForce = separation(boid, rectangles);
     const alignmentForce = alignment(boid, rectangles);
     const cohesionForce = cohesion(boid, rectangles);
@@ -496,7 +524,7 @@ function updateBoids(): void {
       wanderForce.y * BOID_WANDER_WEIGHT +
       dogForce.y * BOID_DOG_AVOIDANCE_WEIGHT;
 
-    limitSpeed(boid);
+    limitSpeed(boid, panicLevel);
     smoothRotation(boid);
 
     const center = getCenter(boid);
