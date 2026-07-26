@@ -21,12 +21,14 @@ const BOID_COHESION_WEIGHT = 0.9;
 const BOID_OBSTACLE_AVOIDANCE_WEIGHT = 2.5;
 const BOID_BOUNDARY_AVOIDANCE_WEIGHT = 1.8;
 const BOID_WANDER_WEIGHT = 0.45;
+const BOID_DOG_AVOIDANCE_WEIGHT = 3.5;
 
 // Boid perception and movement
 const BOID_PERCEPTION_RADIUS = 25;
 const BOID_SEPARATION_RADIUS = 18;
 const BOID_OBSTACLE_AVOIDANCE_DISTANCE = 1;
 const BOID_BOUNDARY_MARGIN = 1;
+const BOID_DOG_AVOIDANCE_DISTANCE = 70;
 const BOID_MIN_SPEED = 0.05;
 const BOID_MAX_SPEED = 0.5;
 const BOID_MAX_FORCE = 0.15;
@@ -39,6 +41,9 @@ const BOID_WANDER_DISTANCE = 18;
 // Rotation smoothing
 const BOID_ROTATION_SMOOTHING = 0.2;
 
+// Sheepdog cursor
+const DOG_RADIUS = 7;
+
 const rectangles: Rectangle[] = [];
 const obstacles: Obstacle[] = [
   { x: 90, y: 140, width: 45, height: 35 },
@@ -47,6 +52,40 @@ const obstacles: Obstacle[] = [
 ];
 
 let animationId: number | null = null;
+let isPaused = false;
+let mouseX = -1000;
+let mouseY = -1000;
+let mouseOnCanvas = false;
+
+function getCanvasMousePosition(event: MouseEvent): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return {
+    x: (event.clientX - rect.left) * scaleX,
+    y: (event.clientY - rect.top) * scaleY,
+  };
+}
+
+canvas.addEventListener('mousemove', (event) => {
+  const position = getCanvasMousePosition(event);
+  mouseX = position.x;
+  mouseY = position.y;
+  mouseOnCanvas = true;
+});
+
+canvas.addEventListener('mouseleave', () => {
+  mouseOnCanvas = false;
+});
+
+let pauseBtn: HTMLButtonElement;
+{
+  const pauseBtnEl = document.getElementById('pause-btn');
+  if (!(pauseBtnEl instanceof HTMLButtonElement)) {
+    throw new Error('Pause button not found');
+  }
+  pauseBtn = pauseBtnEl;
+}
 
 function getCenter(rect: Rectangle): { x: number; y: number } {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -392,6 +431,23 @@ function obstacleAvoidance(boid: Rectangle): { x: number; y: number } {
   return limitForce(steerX, steerY);
 }
 
+function dogAvoidance(boid: Rectangle): { x: number; y: number } {
+  if (!mouseOnCanvas) return { x: 0, y: 0 };
+
+  const center = getCenter(boid);
+  const dx = center.x - mouseX;
+  const dy = center.y - mouseY;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist >= BOID_DOG_AVOIDANCE_DISTANCE || dist === 0) {
+    return { x: 0, y: 0 };
+  }
+
+  const strength = (BOID_DOG_AVOIDANCE_DISTANCE - dist) / BOID_DOG_AVOIDANCE_DISTANCE;
+  const panic = strength * strength;
+  return limitForce((dx / dist) * panic, (dy / dist) * panic);
+}
+
 function boundaryAvoidance(boid: Rectangle): { x: number; y: number } {
   const center = getCenter(boid);
   let steerX = 0;
@@ -420,6 +476,7 @@ function updateBoids(): void {
     const obstacleForce = obstacleAvoidance(boid);
     const boundaryForce = boundaryAvoidance(boid);
     const wanderForce = wander(boid);
+    const dogForce = dogAvoidance(boid);
 
     boid.vx +=
       separationForce.x * BOID_SEPARATION_WEIGHT +
@@ -427,7 +484,8 @@ function updateBoids(): void {
       cohesionForce.x * BOID_COHESION_WEIGHT +
       obstacleForce.x * BOID_OBSTACLE_AVOIDANCE_WEIGHT +
       boundaryForce.x * BOID_BOUNDARY_AVOIDANCE_WEIGHT +
-      wanderForce.x * BOID_WANDER_WEIGHT;
+      wanderForce.x * BOID_WANDER_WEIGHT +
+      dogForce.x * BOID_DOG_AVOIDANCE_WEIGHT;
 
     boid.vy +=
       separationForce.y * BOID_SEPARATION_WEIGHT +
@@ -435,7 +493,8 @@ function updateBoids(): void {
       cohesionForce.y * BOID_COHESION_WEIGHT +
       obstacleForce.y * BOID_OBSTACLE_AVOIDANCE_WEIGHT +
       boundaryForce.y * BOID_BOUNDARY_AVOIDANCE_WEIGHT +
-      wanderForce.y * BOID_WANDER_WEIGHT;
+      wanderForce.y * BOID_WANDER_WEIGHT +
+      dogForce.y * BOID_DOG_AVOIDANCE_WEIGHT;
 
     limitSpeed(boid);
     smoothRotation(boid);
@@ -470,18 +529,42 @@ function render(): void {
     ctx.fillRect(-rect.width / 2, -rect.height / 2, rect.width, rect.height);
     ctx.restore();
   }
+
+  if (mouseOnCanvas) {
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath();
+    ctx.arc(mouseX, mouseY, DOG_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function tick(): void {
-  updateBoids();
+  if (!isPaused) {
+    updateBoids();
+  }
   render();
   animationId = requestAnimationFrame(tick);
+}
+
+function pauseSimulation(): void {
+  if (isPaused || animationId === null) return;
+  isPaused = true;
+  pauseBtn.textContent = 'Resume';
+}
+
+function resumeSimulation(): void {
+  if (!isPaused) return;
+  isPaused = false;
+  pauseBtn.textContent = 'Pause';
 }
 
 function startSimulation(): void {
   if (animationId !== null) {
     cancelAnimationFrame(animationId);
   }
+  isPaused = false;
+  pauseBtn.textContent = 'Pause';
+  pauseBtn.disabled = false;
   animationId = requestAnimationFrame(tick);
 }
 
@@ -552,6 +635,14 @@ startBtn.addEventListener('click', () => {
   countInput.value = String(count);
   addRectanglesInGrid(count);
   startSimulation();
+});
+
+pauseBtn.addEventListener('click', () => {
+  if (isPaused) {
+    resumeSimulation();
+  } else {
+    pauseSimulation();
+  }
 });
 
 render();
