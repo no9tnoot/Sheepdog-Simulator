@@ -36,6 +36,18 @@ const BOID_MAX_FORCE = 0.15;
 const BOID_PANIC_MAX_FORCE = 0.55;
 const BOID_CRUISE_SPEED_DECAY = 0.94;
 
+// Grazing
+const HERD_COOLDOWN_MS = 10_000;
+const BOID_GRAZING_COHESION_WEIGHT = 0.12;
+const BOID_GRAZING_SEPARATION_WEIGHT = 1.9;
+const BOID_GRAZING_ALIGNMENT_WEIGHT = 0.15;
+const GRAZE_IDLE_MIN_FRAMES = 90;
+const GRAZE_IDLE_MAX_FRAMES = 240;
+const GRAZE_MOVE_MIN_DISTANCE = 8;
+const GRAZE_MOVE_MAX_DISTANCE = 28;
+const GRAZE_WALK_SPEED = 0.07;
+const GRAZE_ARRIVAL_DISTANCE = 2;
+
 // Wander steering
 const BOID_WANDER_JITTER = 0.2;
 const BOID_WANDER_RADIUS = 10;
@@ -121,9 +133,26 @@ function getDogPanicLevel(boid: Rectangle): number {
   return strength * strength;
 }
 
+function randomGrazeIdleTime(): number {
+  return (
+    GRAZE_IDLE_MIN_FRAMES +
+    Math.floor(Math.random() * (GRAZE_IDLE_MAX_FRAMES - GRAZE_IDLE_MIN_FRAMES))
+  );
+}
+
 function createBoidMotion(velocity: { vx: number; vy: number }): Pick<
   Rectangle,
-  'vx' | 'vy' | 'angle' | 'wanderAngle' | 'wanderStrength'
+  | 'vx'
+  | 'vy'
+  | 'angle'
+  | 'wanderAngle'
+  | 'wanderStrength'
+  | 'grazing'
+  | 'lastDogSeenAt'
+  | 'grazePhase'
+  | 'grazeTimer'
+  | 'grazeTargetX'
+  | 'grazeTargetY'
 > {
   return {
     vx: velocity.vx,
@@ -131,7 +160,82 @@ function createBoidMotion(velocity: { vx: number; vy: number }): Pick<
     angle: velocityToAngle(velocity.vx, velocity.vy),
     wanderAngle: Math.random() * Math.PI * 2,
     wanderStrength: 0.75 + Math.random() * 0.5,
+    grazing: true,
+    lastDogSeenAt: 0,
+    grazePhase: 'idle',
+    grazeTimer: randomGrazeIdleTime(),
+    grazeTargetX: 0,
+    grazeTargetY: 0,
   };
+}
+
+function updateGrazingState(boid: Rectangle): void {
+  const seesDog = getDogPanicLevel(boid) > 0.05;
+  const now = performance.now();
+
+  if (seesDog) {
+    boid.lastDogSeenAt = now;
+    boid.grazing = false;
+    return;
+  }
+
+  if (now - boid.lastDogSeenAt >= HERD_COOLDOWN_MS) {
+    if (!boid.grazing) {
+      boid.grazePhase = 'idle';
+      boid.grazeTimer = randomGrazeIdleTime();
+      boid.vx = 0;
+      boid.vy = 0;
+    }
+    boid.grazing = true;
+  }
+}
+
+function clampGrazeTarget(x: number, y: number): { x: number; y: number } {
+  const margin = BOID_BOUNDARY_MARGIN + RECT_HEIGHT;
+  return {
+    x: Math.max(margin, Math.min(x, canvas.width - margin)),
+    y: Math.max(margin, Math.min(y, canvas.height - margin)),
+  };
+}
+
+function updateGrazing(boid: Rectangle): void {
+  const center = getCenter(boid);
+
+  if (boid.grazePhase === 'idle') {
+    boid.vx = 0;
+    boid.vy = 0;
+    boid.grazeTimer--;
+
+    if (boid.grazeTimer <= 0) {
+      const angle = Math.random() * Math.PI * 2;
+      const distance =
+        GRAZE_MOVE_MIN_DISTANCE +
+        Math.random() * (GRAZE_MOVE_MAX_DISTANCE - GRAZE_MOVE_MIN_DISTANCE);
+      const target = clampGrazeTarget(
+        center.x + Math.cos(angle) * distance,
+        center.y + Math.sin(angle) * distance,
+      );
+      boid.grazeTargetX = target.x;
+      boid.grazeTargetY = target.y;
+      boid.grazePhase = 'walking';
+    }
+    return;
+  }
+
+  const dx = boid.grazeTargetX - center.x;
+  const dy = boid.grazeTargetY - center.y;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist < GRAZE_ARRIVAL_DISTANCE) {
+    boid.vx = 0;
+    boid.vy = 0;
+    boid.grazePhase = 'idle';
+    boid.grazeTimer = randomGrazeIdleTime();
+    return;
+  }
+
+  boid.vx = (dx / dist) * GRAZE_WALK_SPEED;
+  boid.vy = (dy / dist) * GRAZE_WALK_SPEED;
 }
 
 function smoothRotation(boid: Rectangle): void {
@@ -497,6 +601,60 @@ function boundaryAvoidance(boid: Rectangle): { x: number; y: number } {
 
 function updateBoids(): void {
   for (const boid of rectangles) {
+    updateGrazingState(boid);
+
+    if (boid.grazing) {
+      updateGrazing(boid);
+
+      const separationForce = separation(boid, rectangles);
+      const cohesionForce = cohesion(boid, rectangles);
+      const alignmentForce = alignment(boid, rectangles);
+      const obstacleForce = obstacleAvoidance(boid);
+      const boundaryForce = boundaryAvoidance(boid);
+
+      if (boid.grazePhase === 'idle') {
+        boid.vx +=
+          separationForce.x * BOID_GRAZING_SEPARATION_WEIGHT +
+          cohesionForce.x * BOID_GRAZING_COHESION_WEIGHT +
+          alignmentForce.x * BOID_GRAZING_ALIGNMENT_WEIGHT +
+          obstacleForce.x * BOID_OBSTACLE_AVOIDANCE_WEIGHT +
+          boundaryForce.x * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
+
+        boid.vy +=
+          separationForce.y * BOID_GRAZING_SEPARATION_WEIGHT +
+          cohesionForce.y * BOID_GRAZING_COHESION_WEIGHT +
+          alignmentForce.y * BOID_GRAZING_ALIGNMENT_WEIGHT +
+          obstacleForce.y * BOID_OBSTACLE_AVOIDANCE_WEIGHT +
+          boundaryForce.y * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
+
+        const idleSpeed = Math.hypot(boid.vx, boid.vy);
+        if (idleSpeed > GRAZE_WALK_SPEED) {
+          boid.vx = (boid.vx / idleSpeed) * GRAZE_WALK_SPEED;
+          boid.vy = (boid.vy / idleSpeed) * GRAZE_WALK_SPEED;
+        }
+      } else {
+        boid.vx += obstacleForce.x * BOID_OBSTACLE_AVOIDANCE_WEIGHT;
+        boid.vy += obstacleForce.y * BOID_OBSTACLE_AVOIDANCE_WEIGHT;
+        boid.vx += boundaryForce.x * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
+        boid.vy += boundaryForce.y * BOID_BOUNDARY_AVOIDANCE_WEIGHT;
+
+        const walkSpeed = Math.hypot(boid.vx, boid.vy);
+        if (walkSpeed > GRAZE_WALK_SPEED) {
+          boid.vx = (boid.vx / walkSpeed) * GRAZE_WALK_SPEED;
+          boid.vy = (boid.vy / walkSpeed) * GRAZE_WALK_SPEED;
+        }
+      }
+
+      smoothRotation(boid);
+
+      const center = getCenter(boid);
+      setCenter(boid, center.x + boid.vx, center.y + boid.vy);
+
+      resolveObstacleCollisions(boid);
+      resolveBoundaryCollisions(boid);
+      continue;
+    }
+
     const panicLevel = getDogPanicLevel(boid);
     const separationForce = separation(boid, rectangles);
     const alignmentForce = alignment(boid, rectangles);

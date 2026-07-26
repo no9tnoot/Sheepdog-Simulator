@@ -8,7 +8,15 @@ interface Rectangle {
   angle: number;
   wanderAngle: number;
   wanderStrength: number;
+  grazing: boolean;
+  lastDogSeenAt: number;
+  grazePhase: GrazePhase;
+  grazeTimer: number;
+  grazeTargetX: number;
+  grazeTargetY: number;
 }
+
+type GrazePhase = 'idle' | 'walking';
 
 interface Obstacle {
   x: number;
